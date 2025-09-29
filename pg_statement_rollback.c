@@ -91,6 +91,9 @@ static emit_log_hook_type prev_log_hook = NULL;
 static void slr_ExecutorStart(QueryDesc *queryDesc, int eflags);
 static void slr_ExecutorEnd(QueryDesc *queryDesc);
 static void slr_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction,
+#if PG_VERSION_NUM >= 180000
+                 long unsigned count
+#else
 #if PG_VERSION_NUM >= 90600
                  uint64 count
 #else
@@ -98,6 +101,7 @@ static void slr_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction,
 #endif
 #if PG_VERSION_NUM >= 100000
                  ,bool execute_once
+#endif
 #endif
 	);
 static void slr_ExecutorFinish(QueryDesc *queryDesc);
@@ -583,6 +587,9 @@ slr_ExecutorStart(QueryDesc *queryDesc, int eflags)
  */
 static void
 slr_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction,
+#if PG_VERSION_NUM >= 180000
+                 long unsigned count
+#else
 #if PG_VERSION_NUM >= 90600
                  uint64 count
 #else
@@ -590,6 +597,7 @@ slr_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction,
 #endif
 #if PG_VERSION_NUM >= 100000
                  , bool execute_once
+#endif
 #endif
 	)
 {
@@ -599,16 +607,24 @@ slr_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction,
 	PG_TRY();
 	{
 		if (prev_ExecutorRun)
+#if PG_VERSION_NUM >= 180000
+			prev_ExecutorRun(queryDesc, direction, count);
+#else
 #if PG_VERSION_NUM >= 100000
 			prev_ExecutorRun(queryDesc, direction, count, execute_once);
 #else
 			prev_ExecutorRun(queryDesc, direction, count);
 #endif
+#endif
 		else
+#if PG_VERSION_NUM >= 180000
+			standard_ExecutorRun(queryDesc, direction, count);
+#else
 #if PG_VERSION_NUM >= 100000
 			standard_ExecutorRun(queryDesc, direction, count, execute_once);
 #else
 			standard_ExecutorRun(queryDesc, direction, count);
+#endif
 #endif
 		elog(DEBUG1, "RSL: ExecutorRun decreasing slr_nest_executor_level.");
 		slr_nest_executor_level--;
