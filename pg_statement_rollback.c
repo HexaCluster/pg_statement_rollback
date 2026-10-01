@@ -517,8 +517,13 @@ slr_ProcessUtility(SLR_PROCESSUTILITY_PROTO)
 		slr_save_resowner();
 
 		/* make sure the transaction opening has been processed */
-		CommitTransactionCommand();
-		CommandCounterIncrement();
+		{
+			MemoryContext oldcxt = CurrentMemoryContext;
+
+			CommitTransactionCommand();
+			CommandCounterIncrement();
+			MemoryContextSwitchTo(oldcxt);
+		}
 
 		/*
 		 * and create our savepoint. We don't check for the planner stage here,
@@ -720,6 +725,16 @@ slr_ExecutorEnd(QueryDesc *queryDesc)
 
 		slr_defered_save_resowner = false;
 	}
+	else if (slr_nest_executor_level == 0)
+	{
+		/*
+		 * Top level statement that didn't consume the resowner saved in
+		 * slr_ExecutorStart(), don't leave it stale.  Nested executors must
+		 * not touch it, the top level one still needs it.
+		 */
+		oldresowner = NULL;
+		slrPortalContext = NULL;
+	}
 
 	if (prev_ExecutorEnd)
 		prev_ExecutorEnd(queryDesc);
@@ -753,9 +768,14 @@ slr_restore_resowner(void)
 void
 slr_save_resowner(void)
 {
-	Assert(oldresowner == NULL);
 	Assert(slr_nest_executor_level == 0);
 
+	/*
+	 * oldresowner can legitimately still be set here: slr_ExecutorStart()
+	 * saves it for every top level statement, but it is only consumed when a
+	 * savepoint is (re)created (write statements), and never when the
+	 * statement fails or is read-only.  Just overwrite the stale value.
+	 */
 	if (slr_enabled && slr_xact_opened)
 	{
 		oldresowner = CurrentResourceOwner;
@@ -781,8 +801,19 @@ slr_add_savepoint(void)
 	if (slr_enabled && slr_xact_opened)
 	{
 		MemoryContextCallback *slr_cb = NULL;
+		MemoryContext oldcxt = CurrentMemoryContext;
 
 		elog(DEBUG1, "RSL: adding savepoint %s.", slr_savepoint_name);
+
+		/*
+		 * Start the subtransaction from the current transaction context, not
+		 * from the caller's one: the subtransaction remembers the memory
+		 * context that was current when it started (priorContext, PG17+) and
+		 * switches back to it when it is cleaned up.  The caller's context is
+		 * usually the portal context, which is gone by the time a ROLLBACK TO
+		 * cleans the subtransaction up.
+		 */
+		MemoryContextSwitchTo(CurTransactionContext);
 
 		/* Define savepoint */
 		DefineSavepoint(slr_savepoint_name);
@@ -818,6 +849,13 @@ slr_add_savepoint(void)
 		slrPortalContext = NULL;
 
 		slr_pending = true;
+
+		/*
+		 * Starting the subtransaction and committing the command switch the
+		 * current memory context.  Restore the caller's one (the portal
+		 * context), as PortalRun() asserts on it since PG19.
+		 */
+		MemoryContextSwitchTo(oldcxt);
 	}
 }
 
@@ -832,6 +870,7 @@ slr_release_savepoint(void)
 
 	if (slr_enabled && slr_xact_opened && slr_pending)
 	{
+		MemoryContext oldcxt = CurrentMemoryContext;
 #if PG_VERSION_NUM < 110000
 		List       *options = NIL;
 		DefElem    *elem = NULL;
@@ -855,6 +894,9 @@ slr_release_savepoint(void)
 		CommandCounterIncrement();
 
 		slr_pending = false;
+
+		/* Restore the caller's memory context, see slr_add_savepoint() */
+		MemoryContextSwitchTo(oldcxt);
 
 		/* Manually log the order if needed */
 		slr_log("RELEASE");
